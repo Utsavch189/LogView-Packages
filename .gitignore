@@ -1,0 +1,5 @@
+**/__pycache__
+**/dist
+**.env
+**/build
+**/logview_core.egg-info
