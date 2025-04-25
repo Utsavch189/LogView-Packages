@@ -17,7 +17,7 @@ from logview_core import LogViewHandler
 from logview_core import LogViewHandler
 import logger
 
-handler = LogView(source_token="...",host="...")
+handler = LogViewHandler(source_token="...",host="...")
 logger = logging.getLogger("TEST")
 logger.setLevel(logging.DEBUG)
 logger.addHandler(handler)
