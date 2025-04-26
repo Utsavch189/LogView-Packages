@@ -36,16 +36,29 @@ class LogViewHandler(logging.Handler):
         self.drop_extra_events = drop_extra_events
         self.formatter = logging.Formatter("%(asctime)s", datefmt="%Y-%m-%d %H:%M:%S")
         self.fallback_file = fallback_file
-        self.stop_event = threading.Event()
-        self.flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
-        self.flush_thread.start()
         self.dropcount = 0
         self.session = requests.Session()
+        self.stop_event = threading.Event()
+
+        # Flush thread management
+        self.flush_thread = None
+        self.flush_thread_started = False
+        self.flush_thread_lock = threading.Lock()
 
         atexit.register(self.close)
 
+    def ensure_flush_thread_alive(self):
+        if not self.flush_thread_started:
+            with self.flush_thread_lock:
+                if not self.flush_thread_started:
+                    self.flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
+                    self.flush_thread.start()
+                    self.flush_thread_started = True
+
     def emit(self, record):
         try:
+            self.ensure_flush_thread_alive()
+
             log_data = {
                 "time": self.formatter.formatTime(record),
                 "level": record.levelname,
@@ -68,17 +81,26 @@ class LogViewHandler(logging.Handler):
                 log_data["exception"] = ''.join(traceback.format_exception(*record.exc_info))
 
             self.pipe.put(log_data, block=not self.drop_extra_events)
+
+            if self.pipe.qsize() >= self.batch_size:
+                self._flush()
+
         except queue.Full:
             self.dropcount += 1
         except Exception as e:
             if self.fallback_file:
-                self._write_fallback(str(e))
+                self._write_fallback({"error": str(e)})
             else:
                 raise e
 
     def _flush_loop(self):
+        last_flush = time.monotonic()
+
         while not self.stop_event.is_set():
-            self._flush()
+            now = time.monotonic()
+            if now - last_flush >= self.flush_interval:
+                self._flush()
+                last_flush = now
             time.sleep(self.check_interval)
 
     def _flush(self):
@@ -98,7 +120,8 @@ class LogViewHandler(logging.Handler):
                 headers = {
                     "Authorization": f"Bearer {self.source_token}"
                 }
-                res = self.session.post(f"{self.host}/api/logs/ingest", json=logs, timeout=3,headers=headers)
+                res = self.session.post(f"{self.host}/api/logs/ingest", json=logs, timeout=3, headers=headers)
+
                 if res.ok:
                     return
                 else:
@@ -107,7 +130,6 @@ class LogViewHandler(logging.Handler):
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_BACKOFF_BASE * (2 ** (attempt - 1)))
                 else:
-                    # print(f"LogView failed to send logs after {MAX_RETRIES} attempts: {e}")
                     if self.fallback_file:
                         self._write_fallback(logs)
 
@@ -115,13 +137,17 @@ class LogViewHandler(logging.Handler):
         try:
             os.makedirs(os.path.dirname(self.fallback_file), exist_ok=True)
             with open(self.fallback_file, "a", encoding="utf-8") as f:
-                for entry in logs:
-                    f.write(json.dumps(entry) + "\n")
+                if isinstance(logs, list):
+                    for entry in logs:
+                        f.write(json.dumps(entry) + "\n")
+                else:
+                    f.write(json.dumps(logs) + "\n")
         except Exception as e:
             raise e
 
     def close(self):
-        self.stop_event.set()
-        self.flush_thread.join(timeout=2)
-        self._flush()
+        if self.flush_thread_started and not self.stop_event.is_set():
+            self.stop_event.set()
+            self.flush_thread.join(timeout=2)
+            self._flush()
         super().close()
