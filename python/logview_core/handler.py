@@ -8,6 +8,7 @@ import queue
 import atexit
 import json
 import os
+import msgpack
 
 DEFAULT_BUFFER_CAPACITY = 1000
 DEFAULT_FLUSH_INTERVAL = 1
@@ -118,9 +119,11 @@ class LogViewHandler(logging.Handler):
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 headers = {
-                    "Authorization": f"Bearer {self.source_token}"
+                    "Authorization": f"Bearer {self.source_token}",
+                    "Content-Type": "application/x-msgpack"
                 }
-                res = self.session.post(f"{self.host}/api/logs/ingest", json=logs, timeout=3, headers=headers)
+                packed_data = msgpack.packb(logs,use_bin_type=True)
+                res = self.session.post(f"{self.host}/api/logs/ingest", data=packed_data, timeout=3, headers=headers)
 
                 if res.ok:
                     return
